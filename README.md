@@ -36,6 +36,7 @@ Com o corte exato ligado, o arquivo já sai pronto.
 - vários links de uma vez e vários trechos por vídeo;
 - vídeo inteiro, MP3, ou ambos em colunas separadas;
 - qualidades: melhor possível, 1080p, 720p, 480p, 360p, 240p, 144p;
+- baixa o ffmpeg sozinho na primeira vez, sem precisar instalar nada;
 - salvar e carregar listas em `.json` (dá para montar a lista antes e fechar o app);
 - cookies do navegador (Chrome, Edge, Firefox, Brave, Opera, Vivaldi) para vídeos que pedem login;
 - botão **Parar** que interrompe tudo na hora;
@@ -43,14 +44,23 @@ Com o corte exato ligado, o arquivo já sai pronto.
 
 ## Requisitos
 
-| | Para quê |
-|---|---|
-| **ffmpeg** | obrigatório para recortar e converter MP3. Sem ele só dá para baixar a mídia crua. |
-| **Node.js / Deno / Bun** | opcional, mas recomendado. Sem um runtime JS o YouTube esconde parte dos formatos. |
+Nenhum. É só baixar e abrir.
 
-Baixe o ffmpeg em [gyan.dev/ffmpeg](https://www.gyan.dev/ffmpeg/builds/) (ou `winget install Gyan.FFmpeg`)
-e o Node em [nodejs.org](https://nodejs.org). O app procura os dois sozinho — o rodapé mostra
-`ffmpeg: OK | JavaScript: node` quando encontra.
+Na primeira vez o app baixa sozinho o **ffmpeg** (o programa que faz o corte e converte para
+MP3), umas 110 MB do site oficial [gyan.dev](https://www.gyan.dev/ffmpeg/builds/). Ele fica
+salvo numa pasta `ffmpeg\` ao lado do app, então baixa uma vez só. Você pode ver isso na
+primeira execução: aparece o botão **Baixar ffmpeg** do lado do status verde/vermelho, e
+também aparece sozinho se você clicar em **BAIXAR TUDO** sem ele.
+
+O **Node.js** é opcional, mas recomendado: sem um runtime JavaScript o YouTube esconde parte
+dos formatos disponíveis. Se você já tiver (ou instalar em [nodejs.org](https://nodejs.org)),
+o app acha sozinho — o rodapé mostra `ffmpeg: OK | JavaScript: node` quando ambos estão prontos.
+
+Se preferir instalar o ffmpeg por conta própria, em vez de deixar o app baixar:
+
+    winget install Gyan.FFmpeg
+
+O app sempre dá preferência ao ffmpeg já instalado no sistema.
 
 ## Rodar pelo código
 

@@ -7,6 +7,8 @@ import sys
 import threading
 import time
 import tkinter as tk
+import urllib.request
+import zipfile
 from tkinter import filedialog, messagebox, ttk
 
 try:
@@ -111,7 +113,7 @@ def achatar_url(texto):
     return texto
 
 
-def _varrer_rafal(raiz, profundidade=3):
+def _varrer_diretorios(raiz, profundidade=3):
     if not raiz or not os.path.isdir(raiz):
         return None
     pilha = [(raiz, 0)]
@@ -146,7 +148,7 @@ def achar_ffmpeg():
         r"C:\ffmpeg",
         r"C:\Program Files\ffmpeg",
     ):
-        achado = _varrer_rafal(raiz)
+        achado = _varrer_diretorios(raiz)
         if achado:
             return achado
     return None
@@ -168,13 +170,81 @@ def ativar_ffmpeg():
     O YoutubeFD.available() do yt-dlp ignora o parametro ffmpeg_location quando a API
     Python e usada, entao o diretorio precisa estar no PATH do processo.
     """
-    diretorio = achar_ffmpeg()
+    diretorio = achar_ffmpeg() or achar_ffmpeg_baixado()
     if not diretorio:
         return None
     partes = [p for p in os.environ.get("PATH", "").split(os.pathsep) if p]
     if diretorio.lower() not in [p.lower() for p in partes]:
         os.environ["PATH"] = os.pathsep.join([diretorio] + partes)
     return diretorio
+
+
+def pasta_ffmpeg_baixado():
+    return os.path.join(APP_DIR, "ffmpeg")
+
+
+def achar_ffmpeg_baixado():
+    raiz = pasta_ffmpeg_baixado()
+    candidato = os.path.join(raiz, "ffmpeg.exe")
+    return raiz if os.path.isfile(candidato) else None
+
+
+URL_FFMPEG = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+
+
+def baixar_ffmpeg(progresso=None, cancelar=None):
+    """
+    Baixa o ffmpeg.exe oficial e extrai na pasta do app, para nao obrigar o usuario
+    a instalar nada. So o binario e extraido do zip (o resto e descartado).
+    """
+    raiz = pasta_ffmpeg_baixado()
+    destino = os.path.join(raiz, "ffmpeg.exe")
+    if os.path.isfile(destino):
+        return destino
+
+    os.makedirs(raiz, exist_ok=True)
+    parcial = os.path.join(raiz, "ffmpeg.zip")
+    try:
+        req = urllib.request.Request(URL_FFMPEG, headers={"User-Agent": "RecortarVideos/1.0"})
+        with urllib.request.urlopen(req, timeout=60) as resposta, open(parcial, "wb") as arquivo:
+            total = int(resposta.headers.get("Content-Length") or 0)
+            lido = 0
+            while True:
+                if cancelar is not None and cancelar.is_set():
+                    raise RuntimeError("cancelado")
+                pedaco = resposta.read(1024 * 256)
+                if not pedaco:
+                    break
+                arquivo.write(pedaco)
+                lido += len(pedaco)
+                if progresso is not None:
+                    progresso(lido, total)
+        if progresso is not None:
+            progresso(1, 1)
+        with zipfile.ZipFile(parcial) as z:
+            alvo = None
+            for nome in z.namelist():
+                if nome.replace("\\", "/").endswith("/bin/ffmpeg.exe"):
+                    alvo = nome
+                    break
+            if not alvo:
+                raise RuntimeError("ffmpeg.exe nao encontrado no arquivo baixado")
+            with z.open(alvo) as entrada, open(destino + ".tmp", "wb") as saida:
+                shutil.copyfileobj(entrada, saida, 1024 * 256)
+        os.replace(destino + ".tmp", destino)
+        return destino
+    except Exception:
+        for temporario in (parcial, destino + ".tmp"):
+            try:
+                os.remove(temporario)
+            except OSError:
+                pass
+        raise
+    finally:
+        try:
+            os.remove(parcial)
+        except OSError:
+            pass
 
 
 class Logger:
@@ -373,6 +443,8 @@ class App(tk.Tk):
         self.parar_event = threading.Event()
         self.thread = None
         self.seq = 0
+        self.thread_ffmpeg = None
+        self.cancelar_ffmpeg = threading.Event()
 
         self.var_url = tk.StringVar()
         self.var_inicio = tk.StringVar(value="0:00")
@@ -523,9 +595,16 @@ class App(tk.Tk):
             "ffmpeg: %s   |   JavaScript: %s"
             % ("OK" if ffmpeg_dir else "NAO ENCONTRADO", nome_js or "NAO ENCONTRADO (instale Node ou Deno)")
         )
-        ttk.Label(moldura_opcoes, textvariable=self.var_ffmpeg, foreground=("#1b6b2a" if ffmpeg_dir else "#b00020")).grid(
-            row=3, column=0, columnspan=7, sticky="w", pady=(6, 0)
+        linha_ffmpeg = ttk.Frame(moldura_opcoes)
+        linha_ffmpeg.grid(row=3, column=0, columnspan=7, sticky="w", pady=(6, 0))
+        ttk.Label(linha_ffmpeg, textvariable=self.var_ffmpeg, foreground=("#1b6b2a" if ffmpeg_dir else "#b00020")).pack(
+            side="left"
         )
+        self.btn_ffmpeg = ttk.Button(linha_ffmpeg, text="Baixar ffmpeg", command=self.instalar_ffmpeg)
+        if not ffmpeg_dir:
+            self.btn_ffmpeg.pack(side="left", padx=(12, 0))
+        else:
+            self.btn_ffmpeg.pack_forget()
 
         rodape = ttk.Frame(moldura)
         rodape.grid(row=5, column=0, sticky="ew", pady=(8, 0))
@@ -539,10 +618,56 @@ class App(tk.Tk):
         self.log.grid(row=6, column=0, sticky="ew", pady=(8, 0))
         ttk.Button(moldura, text="Limpar log", command=self.limpar_log).grid(row=7, column=0, sticky="e", pady=(4, 0))
 
-        self.logar("ffmpeg: %s" % (ffmpeg_dir or "nao encontrado no PATH"))
+        self.logar("ffmpeg: %s" % (ffmpeg_dir or "nao encontrado - use o botao 'Baixar ffmpeg'"))
         self.logar("JavaScript runtime: %s (%s)" % (nome_js or "nenhum", caminho_js or "instale Node ou Deno"))
 
         self.bind("<Delete>", lambda _e: self.remover())
+
+    def instalar_ffmpeg(self):
+        if self.thread_ffmpeg and self.thread_ffmpeg.is_alive():
+            return
+        if messagebox.askyesno(
+            "Baixar ffmpeg?",
+            "O ffmpeg e necessario para recortar os videos e converter para MP3.\n\n"
+            "Vou baixar automaticamente (~110 MB) do site oficial gyan.dev e instalar "
+            "dentro da pasta deste app. Nao precisa de administrador.\n\nContinuar?",
+        ):
+            self.cancelar_ffmpeg.clear()
+            self.btn_ffmpeg.configure(state="disabled", text="Baixando...")
+            self.var_status.set("Baixando ffmpeg... 0%")
+            self.logar("Iniciando download do ffmpeg (~110 MB)...")
+            self.thread_ffmpeg = threading.Thread(target=self._worker_ffmpeg, daemon=True)
+            self.thread_ffmpeg.start()
+
+    def _worker_ffmpeg(self):
+        def progresso(lido, total):
+            self.eventos.put(("ffmpeg_progresso", (lido, total)))
+
+        try:
+            caminho = baixar_ffmpeg(progresso=progresso, cancelar=self.cancelar_ffmpeg)
+            self.eventos.put(("ffmpeg_pronto", (caminho, None)))
+        except Exception as erro:  # noqa: BLE001
+            self.eventos.put(("ffmpeg_pronto", (None, str(erro))))
+
+    def _eventos_ffmpeg(self, tipo, dado):
+        if tipo == "ffmpeg_progresso":
+            lido, total = dado
+            fracao = lido / total if total else 0.0
+            self.var_status.set("Baixando ffmpeg... %d%%" % int(fracao * 100))
+        elif tipo == "ffmpeg_pronto":
+            caminho, erro = dado
+            self.btn_ffmpeg.configure(state="normal", text="Baixar ffmpeg")
+            if caminho:
+                ativar_ffmpeg()
+                self.var_ffmpeg.set(
+                    "ffmpeg: OK (baixado)   |   JavaScript: %s" % (achar_js_runtime()[0] or "NAO ENCONTRADO")
+                )
+                self.var_status.set("ffmpeg instalado. Pode usar normalmente.")
+                self.logar("ffmpeg instalado em %s" % caminho)
+                self.btn_ffmpeg.pack_forget()
+            else:
+                self.var_status.set("Falha ao baixar o ffmpeg.")
+                self.logar("ERRO ao baixar ffmpeg: %s" % erro)
 
     def alternar_campos(self):
         mp3 = self.var_formato.get() == "mp3"
@@ -856,7 +981,15 @@ class App(tk.Tk):
             return
         ffmpeg_dir = ativar_ffmpeg()
         if not ffmpeg_dir:
-            messagebox.showerror("ffmpeg", "ffmpeg nao encontrado.\n\nInstale com:  winget install Gyan.FFmpeg")
+            self.var_status.set("ffmpeg necessario para recortar. Baixando...")
+            if not messagebox.askyesno(
+                "ffmpeg necessario",
+                "Para recortar os videos e converter para MP3 o app precisa do ffmpeg.\n\n"
+                "Quer que eu baixe agora (~110 MB, do site oficial gyan.dev)?\n"
+                "Nao precisa de administrador e so demora na primeira vez.",
+            ):
+                return
+            self.instalar_ffmpeg()
             return
         pendentes = [j for j in self.jobs if j["status"] in ("pendente", "erro")]
         if not pendentes:
@@ -928,6 +1061,8 @@ class App(tk.Tk):
                     self.var_status.set(estado.get("texto", ""))
                 elif tipo == "consulta_ok":
                     self.consulta_concluida(dado)
+                elif tipo in ("ffmpeg_progresso", "ffmpeg_pronto"):
+                    self._eventos_ffmpeg(tipo, dado)
                 elif tipo == "consulta_erro":
                     self.var_status.set("Falha ao consultar o link.")
                     self.logar("ERRO: " + dado)
